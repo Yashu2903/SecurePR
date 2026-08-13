@@ -1,32 +1,38 @@
 """
-temporal_worker.py — Phase 5, Milestone 2: hello-world workflow.
+temporal_worker.py — Phase 5, Milestone 3 (fix): passthrough for heavy imports.
 
 Run:
     python3 temporal_worker.py
 """
 
 import asyncio
-from datetime import timedelta
 
-from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.worker import Worker
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
-TASK_QUEUE = "securepr-task-queue"
+from pr_workflow import (
+    TASK_QUEUE,
+    PRVerificationWorkflow,
+    create_check_run_activity,
+    create_sandbox_job_activity,
+    check_job_status_activity,
+    get_job_logs_activity,
+    update_check_run_activity,
+)
 
-
-@activity.defn
-async def say_hello(name: str) -> str:
-    return f"Hello, {name}!"
-
-
-@workflow.defn
-class GreetingWorkflow:
-    @workflow.run
-    async def run(self, name: str) -> str:
-        return await workflow.execute_activity(
-            say_hello, name, start_to_close_timeout=timedelta(seconds=10)
-        )
+# pr_workflow.py imports kubernetes_asyncio and PyGithub at the top of the
+# file, alongside the workflow class itself. Temporal's sandbox tries to
+# re-import that whole file in a restricted environment to check the
+# workflow code is deterministic, and that chain hits a restriction deep
+# inside urllib3. These libraries are only ever touched from activities
+# (which aren't sandboxed), never from the workflow's own run() method,
+# so it's safe to tell Temporal not to sandbox them.
+sandbox_runner = SandboxedWorkflowRunner(
+    restrictions=SandboxRestrictions.default.with_passthrough_modules(
+        "kubernetes_asyncio", "urllib3", "github", "aiohttp"
+    )
+)
 
 
 async def main():
@@ -34,8 +40,15 @@ async def main():
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[GreetingWorkflow],
-        activities=[say_hello],
+        workflows=[PRVerificationWorkflow],
+        activities=[
+            create_check_run_activity,
+            create_sandbox_job_activity,
+            check_job_status_activity,
+            get_job_logs_activity,
+            update_check_run_activity,
+        ],
+        workflow_runner=sandbox_runner,
     )
     print("Worker started, listening on task queue:", TASK_QUEUE)
     await worker.run()

@@ -6,12 +6,16 @@ Same as ns_sandbox_v3.py (namespaces + capability drop), plus a syscall
 allowlist loaded via pyseccomp as the very last step before exec. Once
 loaded, any syscall not on this list returns EPERM instead of running.
 
-The allowlist below was built by tracing a real bash session (strace -c)
-doing basic file/process work, then adding a small set of standard
-syscalls for clean exit, signal handling, and common file operations —
-verified against a live test, not guessed. Running other workloads later
-(npm, pip, gcc, etc.) will likely need syscalls added here; when that
-happens, trace the real command the same way rather than guessing.
+The allowlist started from tracing a real bash session, then grew as real
+workloads surfaced real gaps — always verified against a live trace, not
+guessed:
+  - getgroups: bash startup calls the `groups` command.
+  - clone3, link, sendto, recvfrom, setsockopt, getsockname, getsockopt,
+    setitimer: needed for git clone over HTTPS in general (Phase 6).
+  - gettid, vfork, close_range, epoll_create1, eventfd2, llistxattr,
+    sendmmsg: needed specifically by Debian's git/curl combination's
+    threaded DNS resolver — without gettid, glibc's thread creation for
+    DNS lookups fails with "getaddrinfo() thread failed to start".
 
 Usage:
     python3 ns_sandbox_v4.py -- /bin/bash
@@ -61,6 +65,12 @@ ALLOWED_SYSCALLS = [
     "times", "getrlimit", "setrlimit", "sysinfo", "getrusage", "sigaltstack",
     "setpgid", "sched_yield", "sched_getaffinity", "futex", "capget",
     "prctl", "madvise", "mremap", "msync", "mincore",
+    # added for Phase 6: git clone over HTTPS in general
+    "clone3", "link", "sendto", "recvfrom", "setsockopt",
+    "getsockname", "getsockopt", "setitimer",
+    # added for Phase 6: Debian git/curl's threaded DNS resolver specifically
+    "gettid", "vfork", "close_range", "epoll_create1", "eventfd2",
+    "llistxattr", "sendmmsg",
 ]
 
 
