@@ -1,0 +1,22 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-gvisor-for-sandbox
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: check-runtime-class
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              selector:
+                matchLabels:
+                  app: pr-sandbox
+      validate:
+        message: "Sandbox pods must run under runtimeClassName: gvisor."
+        pattern:
+          spec:
+            runtimeClassName: gvisor

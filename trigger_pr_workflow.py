@@ -6,7 +6,7 @@ Run:
 """
 
 import asyncio
-
+import time
 from temporalio.client import Client
 
 from pr_workflow import PRTarget, PRVerificationWorkflow, TASK_QUEUE
@@ -26,7 +26,7 @@ async def main():
     result = await client.execute_workflow(
         PRVerificationWorkflow.run,
         target,
-        id="test-pr-workflow-1",
+        id=f"test-pr-workflow-{int(time.time())}",
         task_queue=TASK_QUEUE,
     )
     print("Workflow result:", result)

@@ -1,7 +1,7 @@
 """
-webhook_receiver.py — Phase 5, Milestone 4: hand off to Temporal.
+webhook_receiver.py — Phase 10, Milestone 4: deployable to the cluster.
 
-Run:
+Run locally:
     uvicorn webhook_receiver:app --reload --port 8000
 """
 
@@ -11,15 +11,14 @@ import json
 import logging
 import os
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from temporalio.client import Client
 
+from github_client import get_secret
 from pr_workflow import PRTarget, PRVerificationWorkflow, TASK_QUEUE
 
-load_dotenv()
-
-WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
+WEBHOOK_SECRET = get_secret("webhook-secret")
+TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("webhook")
@@ -51,7 +50,7 @@ def verify_signature(raw_body: bytes, signature_header: str) -> bool:
 
 @app.on_event("startup")
 async def startup_event():
-    app.state.temporal_client = await Client.connect("localhost:7233")
+    app.state.temporal_client = await Client.connect(TEMPORAL_ADDRESS)
 
 
 @app.post("/webhook")

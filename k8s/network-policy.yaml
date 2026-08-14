@@ -1,0 +1,39 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-egress-policy
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: pr-sandbox
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []   # deny all inbound — nothing should ever call into a batch job
+  egress:
+    # DNS resolution. GKE routes pod DNS through NodeLocal DNSCache, a
+    # per-node caching daemon on the fixed link-local address
+    # 169.254.20.10 — not directly to the kube-dns pods. That's why the
+    # first version of this rule (targeting kube-system pods) silently
+    # broke all DNS resolution, not just GitHub specifically.
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Outbound HTTPS — needed for git clone — explicitly excluding the
+    # cloud metadata server, a classic exfiltration target. GKE's
+    # ipBlock rules don't include pod-to-pod traffic by design, so this
+    # also naturally blocks reaching other pods in the cluster.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 443

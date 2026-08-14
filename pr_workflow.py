@@ -1,21 +1,22 @@
 """
-pr_workflow.py — Phase 5, Milestone 3: PR verification as a Temporal workflow.
+pr_workflow.py — Phase 10: self-hosted Temporal + in-cluster K8s config.
 
-Each activity wraps exactly one external call (GitHub API or Kubernetes
-API). The workflow just sequences them — this replaces Phase 4's
-asyncio.create_task poller with something Temporal itself tracks and
-can resume even if our process restarts.
+Activities use in-cluster credentials when running as a real pod (the
+actual deployment); falls back to the local kubeconfig for local testing.
 """
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from google.cloud import logging_v2
 from kubernetes_asyncio import client, config
 from temporalio import activity, workflow
 
 from github_client import get_installation_client
 
-SANDBOX_IMAGE = "pr-sandbox:v2"
+GCP_PROJECT_ID = "securepr-505401"
+SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v2"
 K8S_NAMESPACE = "default"
 CHECK_RUN_NAME = "SecurePRBox Sandbox Execution"
 TASK_QUEUE = "securepr-task-queue"
@@ -30,6 +31,15 @@ class PRTarget:
     head_ref: str
     base_ref: str
     installation_id: int
+
+
+async def load_k8s_config():
+    """Use in-cluster credentials when running as a pod; fall back to the
+    local kubeconfig for local testing."""
+    try:
+        config.load_incluster_config()
+    except config.ConfigException:
+        await config.load_kube_config()
 
 
 # ---- Activities ----------------------------------------------------
@@ -50,10 +60,8 @@ def _build_job_manifest(target: PRTarget, check_run_id: int) -> client.V1Job:
     container = client.V1Container(
         name="sandbox",
         image=SANDBOX_IMAGE,
-        image_pull_policy="Never",
-        security_context=client.V1SecurityContext(
-            capabilities=client.V1Capabilities(add=["SYS_ADMIN"])
-        ),
+        command=["python3"],
+        args=["run_pr.py"],
         env=[
             client.V1EnvVar(name="PR_NUMBER", value=str(target.pr_number)),
             client.V1EnvVar(name="PR_REPO_FULL_NAME", value=target.repo_full_name),
@@ -61,8 +69,15 @@ def _build_job_manifest(target: PRTarget, check_run_id: int) -> client.V1Job:
             client.V1EnvVar(name="PR_HEAD_SHA", value=target.head_sha),
         ],
     )
-    pod_spec = client.V1PodSpec(containers=[container], restart_policy="Never")
-    template = client.V1PodTemplateSpec(spec=pod_spec)
+    pod_spec = client.V1PodSpec(
+        containers=[container],
+        restart_policy="Never",
+        runtime_class_name="gvisor",
+    )
+    template = client.V1PodTemplateSpec(
+        metadata=client.V1ObjectMeta(labels={"app": "pr-sandbox"}),
+        spec=pod_spec,
+    )
     job_spec = client.V1JobSpec(template=template, backoff_limit=0)
     return client.V1Job(
         api_version="batch/v1",
@@ -81,7 +96,7 @@ def _build_job_manifest(target: PRTarget, check_run_id: int) -> client.V1Job:
 
 @activity.defn
 async def create_sandbox_job_activity(target: PRTarget, check_run_id: int) -> str:
-    await config.load_kube_config()
+    await load_k8s_config()
     job = _build_job_manifest(target, check_run_id)
     async with client.ApiClient() as api_client:
         batch_api = client.BatchV1Api(api_client)
@@ -91,9 +106,7 @@ async def create_sandbox_job_activity(target: PRTarget, check_run_id: int) -> st
 
 @activity.defn
 async def check_job_status_activity(job_name: str) -> str:
-    """Returns 'running', 'succeeded', or 'failed'. One check per call —
-    the workflow does the waiting/looping, not this activity."""
-    await config.load_kube_config()
+    await load_k8s_config()
     async with client.ApiClient() as api_client:
         batch_api = client.BatchV1Api(api_client)
         job = await batch_api.read_namespaced_job_status(name=job_name, namespace=K8S_NAMESPACE)
@@ -106,7 +119,7 @@ async def check_job_status_activity(job_name: str) -> str:
 
 @activity.defn
 async def get_job_logs_activity(job_name: str) -> str:
-    await config.load_kube_config()
+    await load_k8s_config()
     async with client.ApiClient() as api_client:
         core_api = client.CoreV1Api(api_client)
         pods = await core_api.list_namespaced_pod(
@@ -115,7 +128,21 @@ async def get_job_logs_activity(job_name: str) -> str:
         if not pods.items:
             return "(no pod found)"
         pod_name = pods.items[0].metadata.name
-        return await core_api.read_namespaced_pod_log(name=pod_name, namespace=K8S_NAMESPACE)
+
+    log_client = logging_v2.Client(project=GCP_PROJECT_ID)
+    filter_str = (
+        f'resource.type="k8s_container" '
+        f'resource.labels.pod_name="{pod_name}" '
+        f'resource.labels.namespace_name="{K8S_NAMESPACE}"'
+    )
+
+    for _ in range(5):
+        entries = list(log_client.list_entries(filter_=filter_str, order_by=logging_v2.ASCENDING))
+        if entries:
+            return "\n".join(str(e.payload) for e in entries)
+        await asyncio.sleep(2)
+
+    return "(no log entries found — Cloud Logging may still be ingesting)"
 
 
 @activity.defn
@@ -161,7 +188,7 @@ class PRVerificationWorkflow:
 
         logs = await workflow.execute_activity(
             get_job_logs_activity, job_name,
-            start_to_close_timeout=timedelta(seconds=30),
+            start_to_close_timeout=timedelta(seconds=60),
         )
 
         await workflow.execute_activity(

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netpolicy-test
+  labels:
+    app: pr-sandbox
+spec:
+  runtimeClassName: gvisor
+  containers:
+    - name: test
+      image: curlimages/curl
+      command: ["sleep", "300"]

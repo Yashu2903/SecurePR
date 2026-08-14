@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY pr_workflow.py github_client.py temporal_worker.py .
+
+RUN pip install --no-cache-dir \
+    temporalio \
+    kubernetes-asyncio \
+    PyGithub \
+    google-cloud-secret-manager \
+    google-cloud-logging
+
+CMD ["python3", "temporal_worker.py"]

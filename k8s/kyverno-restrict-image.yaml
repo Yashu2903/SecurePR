@@ -1,0 +1,23 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-sandbox-image-source
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: check-image-registry
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              selector:
+                matchLabels:
+                  app: pr-sandbox
+      validate:
+        message: "Sandbox pods may only use images from our Artifact Registry repo."
+        pattern:
+          spec:
+            containers:
+              - image: "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/*"

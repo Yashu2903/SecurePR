@@ -6,7 +6,7 @@ Run:
 """
 
 import asyncio
-
+import os
 from temporalio.client import Client
 from temporalio.worker import Worker
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
@@ -21,6 +21,8 @@ from pr_workflow import (
     update_check_run_activity,
 )
 
+TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
+
 # pr_workflow.py imports kubernetes_asyncio and PyGithub at the top of the
 # file, alongside the workflow class itself. Temporal's sandbox tries to
 # re-import that whole file in a restricted environment to check the
@@ -30,13 +32,13 @@ from pr_workflow import (
 # so it's safe to tell Temporal not to sandbox them.
 sandbox_runner = SandboxedWorkflowRunner(
     restrictions=SandboxRestrictions.default.with_passthrough_modules(
-        "kubernetes_asyncio", "urllib3", "github", "aiohttp"
+        "kubernetes_asyncio", "urllib3", "github", "aiohttp", "google"
     )
 )
 
 
 async def main():
-    client = await Client.connect("localhost:7233")
+    client = await Client.connect(TEMPORAL_ADDRESS)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,

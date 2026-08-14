@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal-worker
+  template:
+    metadata:
+      labels:
+        app: temporal-worker
+    spec:
+      serviceAccountName: temporal-worker-ksa
+      containers:
+        - name: worker
+          image: us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/temporal-worker:v1
+          imagePullPolicy: Always
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: "temporal-server:7233"

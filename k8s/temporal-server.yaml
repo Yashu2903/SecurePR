@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal-server
+  template:
+    metadata:
+      labels:
+        app: temporal-server
+    spec:
+      serviceAccountName: temporal-server-ksa
+      containers:
+        - name: temporal
+          image: temporalio/auto-setup:1.24.2
+          ports:
+            - containerPort: 7233
+          env:
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: temporal-user
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-credentials
+                  key: password
+            - name: POSTGRES_SEEDS
+              value: "127.0.0.1"
+            - name: BIND_ON_IP
+              value: "0.0.0.0"
+            - name: TEMPORAL_BROADCAST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.0
+          args:
+            - "--port=5432"
+            - "securepr-505401:us-central1:temporal-db"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-server
+spec:
+  selector:
+    app: temporal-server
+  ports:
+    - port: 7233
+      targetPort: 7233

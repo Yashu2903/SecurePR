@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-receiver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webhook-receiver
+  template:
+    metadata:
+      labels:
+        app: webhook-receiver
+    spec:
+      serviceAccountName: webhook-ksa
+      containers:
+        - name: webhook
+          image: us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/webhook-receiver:v1
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: "temporal-server:7233"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-receiver
+spec:
+  type: LoadBalancer
+  selector:
+    app: webhook-receiver
+  ports:
+    - port: 80
+      targetPort: 8000
