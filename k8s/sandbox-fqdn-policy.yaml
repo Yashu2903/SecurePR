@@ -1,0 +1,17 @@
+apiVersion: networking.gke.io/v1alpha1
+kind: FQDNNetworkPolicy
+metadata:
+  name: sandbox-github-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: pr-sandbox
+  egress:
+    - matches:
+        - name: "github.com"
+        - name: "registry.npmjs.org"
+        - name: "pypi.org"
+        - name: "files.pythonhosted.org"
+      ports:
+        - protocol: "TCP"
+          port: 443

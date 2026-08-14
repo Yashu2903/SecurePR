@@ -8,5 +8,5 @@ spec:
   runtimeClassName: gvisor
   containers:
     - name: test
-      image: curlimages/curl
+      image: us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v2
       command: ["sleep", "300"]
