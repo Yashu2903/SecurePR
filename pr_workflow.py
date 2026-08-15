@@ -1,14 +1,21 @@
 """
-pr_workflow.py — Phase 10: self-hosted Temporal + in-cluster K8s config.
+pr_workflow.py — Phase 13: AI execution planner.
 
-Activities use in-cluster credentials when running as a real pod (the
-actual deployment); falls back to the local kubeconfig for local testing.
+plan_execution_activity runs entirely in the trusted worker — it never
+touches the sandbox, needs no sandbox network access, and the sandbox
+never talks to Vertex AI directly. It only ever produces a plan (two
+plain strings); the sandbox executes that plan exactly like a
+deterministically-detected one, under the same gVisor/network/Kyverno
+constraints regardless of where the plan came from.
 """
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from google import genai
+from google.genai import types
 from google.cloud import logging_v2
 from kubernetes_asyncio import client, config
 from temporalio import activity, workflow
@@ -16,10 +23,14 @@ from temporalio import activity, workflow
 from github_client import get_installation_client
 
 GCP_PROJECT_ID = "securepr-505401"
+GCP_LOCATION = "us-central1"
+PLANNER_MODEL = "gemini-2.5-pro"
 SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v3"
 K8S_NAMESPACE = "default"
 CHECK_RUN_NAME = "SecurePRBox Sandbox Execution"
 TASK_QUEUE = "securepr-task-queue"
+
+DETERMINISTIC_MARKERS = {"securepr.sh", "package.json", "requirements.txt", "pyproject.toml"}
 
 
 @dataclass
@@ -34,8 +45,6 @@ class PRTarget:
 
 
 async def load_k8s_config():
-    """Use in-cluster credentials when running as a pod; fall back to the
-    local kubeconfig for local testing."""
     try:
         config.load_incluster_config()
     except config.ConfigException:
@@ -56,7 +65,65 @@ async def create_check_run_activity(target: PRTarget) -> int:
     return check_run.id
 
 
-def _build_job_manifest(target: PRTarget, check_run_id: int) -> client.V1Job:
+@activity.defn
+async def plan_execution_activity(target: PRTarget) -> dict:
+    """If the repo has a recognized marker file, no AI call happens at
+    all — return an empty plan and let the sandbox's existing
+    deterministic detection handle it. Only ask Gemini when nothing
+    deterministic matched. Scoped to Node.js and Python only for now —
+    other languages will typically fail cleanly (no toolchain, no
+    allowlisted registry), which is an acceptable, honest outcome."""
+    gh = get_installation_client(target.installation_id)
+    repo = gh.get_repo(target.repo_full_name)
+    contents = repo.get_contents("", ref=target.head_sha)
+    filenames = [c.name for c in contents]
+
+    if any(name in DETERMINISTIC_MARKERS for name in filenames):
+        return {"install_cmd": "", "test_cmd": ""}
+
+    readme_text = ""
+    for candidate in ("README.md", "README", "readme.md"):
+        if candidate in filenames:
+            readme_file = repo.get_contents(candidate, ref=target.head_sha)
+            readme_text = readme_file.decoded_content.decode("utf-8", errors="ignore")[:2000]
+            break
+
+    readme_context = f"README excerpt:\n{readme_text}" if readme_text else "No README found."
+
+    prompt = f"""A GitHub repository has this root-level file listing:
+{filenames}
+
+{readme_context}
+
+This sandbox can only run Node.js (npm) or Python (pip) projects — no
+other language toolchains are installed, and network access is limited
+to github.com, registry.npmjs.org, pypi.org, and files.pythonhosted.org.
+
+Propose a single shell install command and a single shell test command,
+using only npm or pip. If you cannot confidently determine this is a
+Node.js or Python project, return empty strings for both rather than
+guessing."""
+
+    gemini_client = genai.Client(vertexai=True, project=GCP_PROJECT_ID, location=GCP_LOCATION)
+    response = gemini_client.models.generate_content(
+        model=PLANNER_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema={
+                "type": "object",
+                "properties": {
+                    "install_cmd": {"type": "string"},
+                    "test_cmd": {"type": "string"},
+                },
+                "required": ["install_cmd", "test_cmd"],
+            },
+        ),
+    )
+    return json.loads(response.text)
+
+
+def _build_job_manifest(target: PRTarget, check_run_id: int, plan: dict) -> client.V1Job:
     container = client.V1Container(
         name="sandbox",
         image=SANDBOX_IMAGE,
@@ -67,6 +134,8 @@ def _build_job_manifest(target: PRTarget, check_run_id: int) -> client.V1Job:
             client.V1EnvVar(name="PR_REPO_FULL_NAME", value=target.repo_full_name),
             client.V1EnvVar(name="PR_CLONE_URL", value=target.clone_url),
             client.V1EnvVar(name="PR_HEAD_SHA", value=target.head_sha),
+            client.V1EnvVar(name="PLAN_INSTALL_CMD", value=plan.get("install_cmd", "")),
+            client.V1EnvVar(name="PLAN_TEST_CMD", value=plan.get("test_cmd", "")),
         ],
     )
     pod_spec = client.V1PodSpec(
@@ -95,9 +164,9 @@ def _build_job_manifest(target: PRTarget, check_run_id: int) -> client.V1Job:
 
 
 @activity.defn
-async def create_sandbox_job_activity(target: PRTarget, check_run_id: int) -> str:
+async def create_sandbox_job_activity(target: PRTarget, check_run_id: int, plan: dict) -> str:
     await load_k8s_config()
-    job = _build_job_manifest(target, check_run_id)
+    job = _build_job_manifest(target, check_run_id, plan)
     async with client.ApiClient() as api_client:
         batch_api = client.BatchV1Api(api_client)
         result = await batch_api.create_namespaced_job(namespace=K8S_NAMESPACE, body=job)
@@ -172,8 +241,13 @@ class PRVerificationWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
         )
 
+        plan = await workflow.execute_activity(
+            plan_execution_activity, target,
+            start_to_close_timeout=timedelta(seconds=60),
+        )
+
         job_name = await workflow.execute_activity(
-            create_sandbox_job_activity, args=[target, check_run_id],
+            create_sandbox_job_activity, args=[target, check_run_id, plan],
             start_to_close_timeout=timedelta(seconds=30),
         )
 

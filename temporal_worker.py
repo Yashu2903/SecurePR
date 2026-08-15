@@ -1,5 +1,5 @@
 """
-temporal_worker.py — Phase 5, Milestone 3 (fix): passthrough for heavy imports.
+temporal_worker.py — Phase 13: registers the new planner activity.
 
 Run:
     python3 temporal_worker.py
@@ -15,6 +15,7 @@ from pr_workflow import (
     TASK_QUEUE,
     PRVerificationWorkflow,
     create_check_run_activity,
+    plan_execution_activity,
     create_sandbox_job_activity,
     check_job_status_activity,
     get_job_logs_activity,
@@ -23,13 +24,6 @@ from pr_workflow import (
 
 TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
 
-# pr_workflow.py imports kubernetes_asyncio and PyGithub at the top of the
-# file, alongside the workflow class itself. Temporal's sandbox tries to
-# re-import that whole file in a restricted environment to check the
-# workflow code is deterministic, and that chain hits a restriction deep
-# inside urllib3. These libraries are only ever touched from activities
-# (which aren't sandboxed), never from the workflow's own run() method,
-# so it's safe to tell Temporal not to sandbox them.
 sandbox_runner = SandboxedWorkflowRunner(
     restrictions=SandboxRestrictions.default.with_passthrough_modules(
         "kubernetes_asyncio", "urllib3", "github", "aiohttp", "google"
@@ -45,6 +39,7 @@ async def main():
         workflows=[PRVerificationWorkflow],
         activities=[
             create_check_run_activity,
+            plan_execution_activity,
             create_sandbox_job_activity,
             check_job_status_activity,
             get_job_logs_activity,

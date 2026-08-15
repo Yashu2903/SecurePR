@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir \
     kubernetes-asyncio \
     PyGithub \
     google-cloud-secret-manager \
-    google-cloud-logging
+    google-cloud-logging \
+    google-genai
 
 CMD ["python3", "temporal_worker.py"]

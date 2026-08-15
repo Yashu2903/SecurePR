@@ -86,6 +86,21 @@ def detect_and_run(repo_dir: str) -> int:
     if os.path.isfile(requirements) or os.path.isfile(pyproject):
         return run_python_project(repo_dir)
 
+    plan_install = os.environ.get("PLAN_INSTALL_CMD", "").strip()
+    plan_test = os.environ.get("PLAN_TEST_CMD", "").strip()
+    if plan_install or plan_test:
+        print("Using AI-proposed plan.")
+        if plan_install:
+            install = run(["bash", "-c", plan_install], cwd=repo_dir)
+            if install.returncode != 0:
+                print("AI-proposed install command failed.")
+                return 1
+        if plan_test:
+            test_result = run(["bash", "-c", plan_test], cwd=repo_dir)
+            return test_result.returncode
+        print("No test command proposed. Install succeeded.")
+        return 0
+
     print("No recognized build system found. Listing repo contents instead:")
     run(["ls", "-la"], cwd=repo_dir)
     print("Clone and checkout succeeded. Nothing to run.")
