@@ -25,7 +25,7 @@ from github_client import get_installation_client
 GCP_PROJECT_ID = "securepr-505401"
 GCP_LOCATION = "us-central1"
 PLANNER_MODEL = "gemini-2.5-pro"
-SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v3"
+SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v5"
 K8S_NAMESPACE = "default"
 CHECK_RUN_NAME = "SecurePRBox Sandbox Execution"
 TASK_QUEUE = "securepr-task-queue"

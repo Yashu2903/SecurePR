@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-run_pr.py — clones the PR's code at its exact commit and figures out how
-to build/test it.
+run_pr.py — clones the PR's code, runs static analysis (Semgrep, Trivy,
+Gitleaks), then figures out how to build/test it.
 
-Priority order:
+Static analysis always runs, regardless of build/test outcome — findings
+are informational for now, not yet factored into pass/fail. That scoring
+is the next phase's job (the risk engine).
+
+Priority order for build/test:
   1. securepr.sh — explicit convention, always wins if present.
   2. package.json — auto-detected Node.js project.
-  3. (Python detection added in the next milestone.)
-  4. Fallback — just prove the clone worked.
+  3. requirements.txt / pyproject.toml — auto-detected Python project.
+  4. PLAN_INSTALL_CMD / PLAN_TEST_CMD — AI-proposed plan (Phase 13).
+  5. Fallback — just prove the clone worked.
 """
 
 import json
@@ -19,10 +24,64 @@ CLONE_URL = os.environ["PR_CLONE_URL"]
 HEAD_SHA = os.environ["PR_HEAD_SHA"]
 REPO_DIR = "/workspace/repo"
 
+SEMGREP_RULES_FILE = "/sandbox/semgrep-security-rules.yaml"
+
 
 def run(cmd, **kwargs):
     print(f"$ {' '.join(cmd)}")
     return subprocess.run(cmd, **kwargs)
+
+
+def run_static_analysis(repo_dir: str) -> str:
+    lines = []
+
+    semgrep_result = run(
+        ["semgrep", "--config", SEMGREP_RULES_FILE, "--json", "--quiet", repo_dir],
+        capture_output=True, text=True,
+    )
+    try:
+        findings = json.loads(semgrep_result.stdout).get("results", [])
+        lines.append(f"Semgrep: {len(findings)} finding(s)")
+        for f in findings[:5]:
+            lines.append(f"  - {f['check_id']} at {f['path']}:{f['start']['line']}")
+    except (json.JSONDecodeError, KeyError):
+        lines.append("Semgrep: scan failed to produce valid output")
+
+    trivy_result = run(
+        ["trivy", "fs", "--scanners", "vuln", "--skip-db-update",
+         "--format", "json", repo_dir],
+        capture_output=True, text=True,
+    )
+    try:
+        trivy_data = json.loads(trivy_result.stdout)
+        vuln_lines = []
+        vuln_count = 0
+        for result in trivy_data.get("Results", []) or []:
+            for v in result.get("Vulnerabilities", []) or []:
+                vuln_count += 1
+                if len(vuln_lines) < 5:
+                    vuln_lines.append(f"  - {v['VulnerabilityID']} {v['PkgName']} ({v['Severity']})")
+        lines.append(f"Trivy: {vuln_count} vulnerability finding(s)")
+        lines.extend(vuln_lines)
+    except (json.JSONDecodeError, KeyError):
+        lines.append("Trivy: scan failed to produce valid output")
+
+    gitleaks_report = "/tmp/gitleaks_report.json"
+    run(
+        ["gitleaks", "detect", "--source", repo_dir, "--no-git",
+         "-f", "json", "-r", gitleaks_report, "--exit-code", "0"],
+        capture_output=True, text=True,
+    )
+    try:
+        with open(gitleaks_report) as f:
+            gitleaks_data = json.load(f)
+        lines.append(f"Gitleaks: {len(gitleaks_data)} potential secret(s) found")
+        for g in gitleaks_data[:5]:
+            lines.append(f"  - {g['RuleID']} in {g['File']}:{g['StartLine']}")
+    except (FileNotFoundError, json.JSONDecodeError):
+        lines.append("Gitleaks: 0 potential secret(s) found")
+
+    return "\n".join(lines)
 
 
 def run_node_project(repo_dir: str, package_json_path: str) -> int:
@@ -44,10 +103,10 @@ def run_node_project(repo_dir: str, package_json_path: str) -> int:
     test_result = run(["npm", "test"], cwd=repo_dir)
     return test_result.returncode
 
+
 def run_python_project(repo_dir: str) -> int:
     print("Detected a Python project.")
     requirements = os.path.join(repo_dir, "requirements.txt")
-    pyproject = os.path.join(repo_dir, "pyproject.toml")
 
     if os.path.isfile(requirements):
         install = run(["pip", "install", "--break-system-packages", "-r", "requirements.txt"], cwd=repo_dir)
@@ -117,6 +176,10 @@ def main():
     if checkout.returncode != 0:
         print("Failed to checkout the PR's commit.")
         sys.exit(1)
+
+    print("--- Static analysis ---")
+    print(run_static_analysis(REPO_DIR))
+    print("--- Build / test ---")
 
     sys.exit(detect_and_run(REPO_DIR))
 
