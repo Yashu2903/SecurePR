@@ -3,9 +3,11 @@
 run_pr.py — clones the PR's code, runs static analysis (Semgrep, Trivy,
 Gitleaks), then figures out how to build/test it.
 
-Static analysis always runs, regardless of build/test outcome — findings
-are informational for now, not yet factored into pass/fail. That scoring
-is the next phase's job (the risk engine).
+Static analysis always runs, regardless of build/test outcome. Findings
+are emitted twice: once as human-readable text for the logs, and once as
+a structured JSON footer the worker parses to make the actual pass/fail
+decision (see assess_risk_activity in pr_workflow.py) — that decision is
+fully deterministic, never left to an LLM.
 
 Priority order for build/test:
   1. securepr.sh — explicit convention, always wins if present.
@@ -32,8 +34,10 @@ def run(cmd, **kwargs):
     return subprocess.run(cmd, **kwargs)
 
 
-def run_static_analysis(repo_dir: str) -> str:
+def run_static_analysis(repo_dir: str) -> dict:
     lines = []
+    counts = {"semgrep_count": 0, "trivy_total_count": 0,
+              "trivy_critical_count": 0, "trivy_high_count": 0, "gitleaks_count": 0}
 
     semgrep_result = run(
         ["semgrep", "--config", SEMGREP_RULES_FILE, "--json", "--quiet", repo_dir],
@@ -41,6 +45,7 @@ def run_static_analysis(repo_dir: str) -> str:
     )
     try:
         findings = json.loads(semgrep_result.stdout).get("results", [])
+        counts["semgrep_count"] = len(findings)
         lines.append(f"Semgrep: {len(findings)} finding(s)")
         for f in findings[:5]:
             lines.append(f"  - {f['check_id']} at {f['path']}:{f['start']['line']}")
@@ -55,13 +60,16 @@ def run_static_analysis(repo_dir: str) -> str:
     try:
         trivy_data = json.loads(trivy_result.stdout)
         vuln_lines = []
-        vuln_count = 0
         for result in trivy_data.get("Results", []) or []:
             for v in result.get("Vulnerabilities", []) or []:
-                vuln_count += 1
+                counts["trivy_total_count"] += 1
+                if v["Severity"] == "CRITICAL":
+                    counts["trivy_critical_count"] += 1
+                elif v["Severity"] == "HIGH":
+                    counts["trivy_high_count"] += 1
                 if len(vuln_lines) < 5:
                     vuln_lines.append(f"  - {v['VulnerabilityID']} {v['PkgName']} ({v['Severity']})")
-        lines.append(f"Trivy: {vuln_count} vulnerability finding(s)")
+        lines.append(f"Trivy: {counts['trivy_total_count']} vulnerability finding(s)")
         lines.extend(vuln_lines)
     except (json.JSONDecodeError, KeyError):
         lines.append("Trivy: scan failed to produce valid output")
@@ -75,13 +83,14 @@ def run_static_analysis(repo_dir: str) -> str:
     try:
         with open(gitleaks_report) as f:
             gitleaks_data = json.load(f)
+        counts["gitleaks_count"] = len(gitleaks_data)
         lines.append(f"Gitleaks: {len(gitleaks_data)} potential secret(s) found")
         for g in gitleaks_data[:5]:
             lines.append(f"  - {g['RuleID']} in {g['File']}:{g['StartLine']}")
     except (FileNotFoundError, json.JSONDecodeError):
         lines.append("Gitleaks: 0 potential secret(s) found")
 
-    return "\n".join(lines)
+    return {"text": "\n".join(lines), **counts}
 
 
 def run_node_project(repo_dir: str, package_json_path: str) -> int:
@@ -178,10 +187,20 @@ def main():
         sys.exit(1)
 
     print("--- Static analysis ---")
-    print(run_static_analysis(REPO_DIR))
-    print("--- Build / test ---")
+    analysis = run_static_analysis(REPO_DIR)
+    print(analysis["text"])
 
-    sys.exit(detect_and_run(REPO_DIR))
+    print("--- Build / test ---")
+    build_result = detect_and_run(REPO_DIR)
+
+    # Structured, machine-readable footer for the worker to parse
+    # reliably — not meant for a human reading the raw log.
+    findings = {k: v for k, v in analysis.items() if k != "text"}
+    print("---FINDINGS_JSON---")
+    print(json.dumps(findings))
+    print("---END_FINDINGS_JSON---")
+
+    sys.exit(build_result)
 
 
 if __name__ == "__main__":

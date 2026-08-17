@@ -1,12 +1,10 @@
 """
-pr_workflow.py — Phase 13: AI execution planner.
+pr_workflow.py — Phase 15: the risk engine.
 
-plan_execution_activity runs entirely in the trusted worker — it never
-touches the sandbox, needs no sandbox network access, and the sandbox
-never talks to Vertex AI directly. It only ever produces a plan (two
-plain strings); the sandbox executes that plan exactly like a
-deterministically-detected one, under the same gVisor/network/Kyverno
-constraints regardless of where the plan came from.
+Risk scoring is fully deterministic — never the AI's call, same principle
+as the execution planner in Phase 13. Gemini only ever writes the
+plain-English explanation of a verdict that's already been decided by
+fixed rules.
 """
 
 import asyncio
@@ -25,7 +23,7 @@ from github_client import get_installation_client
 GCP_PROJECT_ID = "securepr-505401"
 GCP_LOCATION = "us-central1"
 PLANNER_MODEL = "gemini-2.5-pro"
-SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v5"
+SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v6"
 K8S_NAMESPACE = "default"
 CHECK_RUN_NAME = "SecurePRBox Sandbox Execution"
 TASK_QUEUE = "securepr-task-queue"
@@ -215,17 +213,58 @@ async def get_job_logs_activity(job_name: str) -> str:
 
 
 @activity.defn
-async def update_check_run_activity(target: PRTarget, check_run_id: int, succeeded: bool, logs: str) -> None:
+async def assess_risk_activity(logs: str, build_succeeded: bool) -> dict:
+    """Risk scoring is fully deterministic — never the AI's call. Gemini
+    only writes the plain-English explanation of a verdict that's
+    already decided by the rules below."""
+    findings = {"semgrep_count": 0, "trivy_total_count": 0,
+                "trivy_critical_count": 0, "trivy_high_count": 0, "gitleaks_count": 0}
+    start, end = "---FINDINGS_JSON---", "---END_FINDINGS_JSON---"
+    if start in logs and end in logs:
+        try:
+            findings = json.loads(logs.split(start, 1)[1].split(end, 1)[0].strip())
+        except json.JSONDecodeError:
+            pass
+
+    if not build_succeeded:
+        conclusion = "failure"
+    elif findings["gitleaks_count"] > 0 or findings["trivy_critical_count"] > 0:
+        conclusion = "failure"
+    elif findings["trivy_high_count"] > 0:
+        conclusion = "neutral"
+    else:
+        conclusion = "success"
+
+    prompt = f"""A PR's automated checks produced these results:
+- Build/test: {"passed" if build_succeeded else "failed"}
+- Semgrep findings: {findings['semgrep_count']}
+- Trivy vulnerabilities: {findings['trivy_total_count']} total ({findings['trivy_critical_count']} critical, {findings['trivy_high_count']} high)
+- Gitleaks (potential secrets): {findings['gitleaks_count']}
+- Overall verdict already decided: {conclusion}
+
+Write a 2-3 sentence plain-English summary of these results for a
+developer reviewing this PR. Be direct about anything serious. Do not
+propose a different verdict than the one given."""
+
+    gemini_client = genai.Client(vertexai=True, project=GCP_PROJECT_ID, location=GCP_LOCATION)
+    response = gemini_client.models.generate_content(model=PLANNER_MODEL, contents=prompt)
+
+    return {"conclusion": conclusion, "summary": response.text}
+
+
+@activity.defn
+async def update_check_run_activity(target: PRTarget, check_run_id: int, conclusion: str, summary: str, logs: str) -> None:
     gh = get_installation_client(target.installation_id)
     repo = gh.get_repo(target.repo_full_name)
     check_run = repo.get_check_run(check_run_id)
     check_run.edit(
         status="completed",
-        conclusion="success" if succeeded else "failure",
+        conclusion=conclusion,
         completed_at=datetime.now(timezone.utc),
         output={
             "title": "Sandbox execution result",
-            "summary": f"```\n{logs[:3000]}\n```",
+            "summary": summary,
+            "text": f"```\n{logs[:3000]}\n```",
         },
     )
 
@@ -265,10 +304,15 @@ class PRVerificationWorkflow:
             start_to_close_timeout=timedelta(seconds=60),
         )
 
+        risk = await workflow.execute_activity(
+            assess_risk_activity, args=[logs, status == "succeeded"],
+            start_to_close_timeout=timedelta(seconds=60),
+        )
+
         await workflow.execute_activity(
             update_check_run_activity,
-            args=[target, check_run_id, status == "succeeded", logs],
+            args=[target, check_run_id, risk["conclusion"], risk["summary"], logs],
             start_to_close_timeout=timedelta(seconds=30),
         )
 
-        return status
+        return risk["conclusion"]

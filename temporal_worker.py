@@ -1,5 +1,5 @@
 """
-temporal_worker.py — Phase 13: registers the new planner activity.
+temporal_worker.py — Phase 15: registers the risk assessment activity.
 
 Run:
     python3 temporal_worker.py
@@ -19,6 +19,7 @@ from pr_workflow import (
     create_sandbox_job_activity,
     check_job_status_activity,
     get_job_logs_activity,
+    assess_risk_activity,
     update_check_run_activity,
 )
 
@@ -43,6 +44,7 @@ async def main():
             create_sandbox_job_activity,
             check_job_status_activity,
             get_job_logs_activity,
+            assess_risk_activity,
             update_check_run_activity,
         ],
         workflow_runner=sandbox_runner,
