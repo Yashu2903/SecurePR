@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /sandbox
 COPY ns_sandbox_v4.py run_pr.py .
 
+RUN pip install --upgrade --break-system-packages --ignore-installed pip
 RUN pip install --no-cache-dir python-prctl pyseccomp pytest semgrep pyyaml
 
 # Semgrep rules — baked in at build time so scans run fully offline,

@@ -126,6 +126,18 @@ def run_python_project(repo_dir: str) -> int:
         print("Dependency install failed.")
         return 1
 
+    # Test-only dependencies are commonly declared separately from the
+    # main install, using one of two incompatible mechanisms:
+    #   - [project.optional-dependencies] (older, PEP 621): pip install .[name]
+    #   - [dependency-groups] (newer, PEP 735): pip install --group name .
+    # Best-effort: try common names under both, ignoring failures since
+    # not every project uses either pattern.
+    for name in ("test", "tests", "testing", "dev"):
+        run(["pip", "install", "--break-system-packages", f".[{name}]"],
+            cwd=repo_dir, capture_output=True)
+        run(["pip", "install", "--break-system-packages", "--group", name, "."],
+            cwd=repo_dir, capture_output=True)
+
     has_tests = os.path.isdir(os.path.join(repo_dir, "tests")) or any(
         f.startswith("test_") and f.endswith(".py") for f in os.listdir(repo_dir)
     )

@@ -23,7 +23,7 @@ from github_client import get_installation_client
 GCP_PROJECT_ID = "securepr-505401"
 GCP_LOCATION = "us-central1"
 PLANNER_MODEL = "gemini-2.5-pro"
-SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v7"
+SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v9"
 K8S_NAMESPACE = "default"
 CHECK_RUN_NAME = "SecurePRBox Sandbox Execution"
 TASK_QUEUE = "securepr-task-queue"
@@ -244,6 +244,16 @@ async def assess_risk_activity(logs: str, build_succeeded: bool) -> dict:
     else:
         conclusion = "success"
 
+    # Give the AI the tail of the actual output too, so it can explain
+    # *why* something failed, not just restate that it did. Grab the
+    # text right before our own findings marker — that's reliably where
+    # a real failure summary (pytest's, npm's, whatever) shows up.
+    marker_pos = logs.find("FINDINGS_JSON:")
+    if marker_pos > 0:
+        log_excerpt = logs[max(0, marker_pos - 2000):marker_pos]
+    else:
+        log_excerpt = logs[-2000:]
+
     prompt = f"""A PR's automated checks produced these results:
 - Build/test: {"passed" if build_succeeded else "failed"}
 - Semgrep findings: {findings['semgrep_count']}
@@ -251,9 +261,14 @@ async def assess_risk_activity(logs: str, build_succeeded: bool) -> dict:
 - Gitleaks (potential secrets): {findings['gitleaks_count']}
 - Overall verdict already decided: {conclusion}
 
+The tail of the actual execution log:
+{log_excerpt}
+
 Write a 2-3 sentence plain-English summary of these results for a
-developer reviewing this PR. Be direct about anything serious. Do not
-propose a different verdict than the one given."""
+developer reviewing this PR. If the build/test failed, explain the
+actual reason based on the log above, not just that it failed. Be
+direct about anything serious. Do not propose a different verdict
+than the one given."""
 
     gemini_client = genai.Client(vertexai=True, project=GCP_PROJECT_ID, location=GCP_LOCATION)
     response = gemini_client.models.generate_content(model=PLANNER_MODEL, contents=prompt)
