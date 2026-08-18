@@ -196,9 +196,7 @@ def main():
     # Structured, machine-readable footer for the worker to parse
     # reliably — not meant for a human reading the raw log.
     findings = {k: v for k, v in analysis.items() if k != "text"}
-    print("---FINDINGS_JSON---")
-    print(json.dumps(findings))
-    print("---END_FINDINGS_JSON---")
+    print("FINDINGS_JSON:" + json.dumps(findings))
 
     sys.exit(build_result)
 

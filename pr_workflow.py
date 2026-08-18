@@ -23,7 +23,7 @@ from github_client import get_installation_client
 GCP_PROJECT_ID = "securepr-505401"
 GCP_LOCATION = "us-central1"
 PLANNER_MODEL = "gemini-2.5-pro"
-SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v6"
+SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v7"
 K8S_NAMESPACE = "default"
 CHECK_RUN_NAME = "SecurePRBox Sandbox Execution"
 TASK_QUEUE = "securepr-task-queue"
@@ -203,13 +203,20 @@ async def get_job_logs_activity(job_name: str) -> str:
         f'resource.labels.namespace_name="{K8S_NAMESPACE}"'
     )
 
-    for _ in range(5):
+    # Cloud Logging doesn't reliably preserve relative order between
+    # entries ingested very close together in time, so wait specifically
+    # for the one self-contained line we know marks completion, rather
+    # than trusting overall order.
+    marker = "FINDINGS_JSON:"
+    entries = []
+    for _ in range(15):
         entries = list(log_client.list_entries(filter_=filter_str, order_by=logging_v2.ASCENDING))
-        if entries:
-            return "\n".join(str(e.payload) for e in entries)
-        await asyncio.sleep(2)
+        payloads = [str(e.payload) for e in entries]
+        if any(p.startswith(marker) for p in payloads):
+            return "\n".join(payloads)
+        await asyncio.sleep(3)
 
-    return "(no log entries found — Cloud Logging may still be ingesting)"
+    return "\n".join(str(e.payload) for e in entries) if entries else "(no log entries found)"
 
 
 @activity.defn
@@ -219,12 +226,14 @@ async def assess_risk_activity(logs: str, build_succeeded: bool) -> dict:
     already decided by the rules below."""
     findings = {"semgrep_count": 0, "trivy_total_count": 0,
                 "trivy_critical_count": 0, "trivy_high_count": 0, "gitleaks_count": 0}
-    start, end = "---FINDINGS_JSON---", "---END_FINDINGS_JSON---"
-    if start in logs and end in logs:
-        try:
-            findings = json.loads(logs.split(start, 1)[1].split(end, 1)[0].strip())
-        except json.JSONDecodeError:
-            pass
+    marker = "FINDINGS_JSON:"
+    for line in logs.splitlines():
+        if line.startswith(marker):
+            try:
+                findings = json.loads(line[len(marker):])
+            except json.JSONDecodeError:
+                pass
+            break
 
     if not build_succeeded:
         conclusion = "failure"
