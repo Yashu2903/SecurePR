@@ -219,6 +219,26 @@ async def get_job_logs_activity(job_name: str) -> str:
     return "\n".join(str(e.payload) for e in entries) if entries else "(no log entries found)"
 
 
+def extract_relevant_log_excerpt(logs: str) -> str:
+    """Try to find pytest's FAILURES section first — the real
+    tracebacks, not just the one-line summary. That's what actually
+    explains why something failed. Fall back to a generic tail if this
+    isn't a pytest run, or the FAILURES section isn't found."""
+    idx = logs.find("FAILURES")
+    if idx != -1:
+        end_idx = logs.find("short test summary", idx)
+        if end_idx == -1:
+            end_idx = idx + 3000
+        excerpt = logs[idx:min(end_idx, idx + 3000)]
+        if excerpt.strip():
+            return excerpt
+
+    marker_pos = logs.find("FINDINGS_JSON:")
+    if marker_pos > 0:
+        return logs[max(0, marker_pos - 2000):marker_pos]
+    return logs[-2000:]
+
+
 @activity.defn
 async def assess_risk_activity(logs: str, build_succeeded: bool) -> dict:
     """Risk scoring is fully deterministic — never the AI's call. Gemini
@@ -245,14 +265,8 @@ async def assess_risk_activity(logs: str, build_succeeded: bool) -> dict:
         conclusion = "success"
 
     # Give the AI the tail of the actual output too, so it can explain
-    # *why* something failed, not just restate that it did. Grab the
-    # text right before our own findings marker — that's reliably where
-    # a real failure summary (pytest's, npm's, whatever) shows up.
-    marker_pos = logs.find("FINDINGS_JSON:")
-    if marker_pos > 0:
-        log_excerpt = logs[max(0, marker_pos - 2000):marker_pos]
-    else:
-        log_excerpt = logs[-2000:]
+    # *why* something failed, not just restate that it did.
+    log_excerpt = extract_relevant_log_excerpt(logs)
 
     prompt = f"""A PR's automated checks produced these results:
 - Build/test: {"passed" if build_succeeded else "failed"}
