@@ -38,6 +38,7 @@ def run_static_analysis(repo_dir: str) -> dict:
     lines = []
     counts = {"semgrep_count": 0, "trivy_total_count": 0,
               "trivy_critical_count": 0, "trivy_high_count": 0, "gitleaks_count": 0}
+    scan_errors = []
 
     semgrep_result = run(
         ["semgrep", "--config", SEMGREP_RULES_FILE, "--json", "--quiet", repo_dir],
@@ -50,7 +51,8 @@ def run_static_analysis(repo_dir: str) -> dict:
         for f in findings[:5]:
             lines.append(f"  - {f['check_id']} at {f['path']}:{f['start']['line']}")
     except (json.JSONDecodeError, KeyError):
-        lines.append("Semgrep: scan failed to produce valid output")
+        lines.append("Semgrep: FAILED TO RUN — scan did not produce valid output")
+        scan_errors.append("semgrep")
 
     trivy_result = run(
         ["trivy", "fs", "--scanners", "vuln", "--skip-db-update",
@@ -72,7 +74,8 @@ def run_static_analysis(repo_dir: str) -> dict:
         lines.append(f"Trivy: {counts['trivy_total_count']} vulnerability finding(s)")
         lines.extend(vuln_lines)
     except (json.JSONDecodeError, KeyError):
-        lines.append("Trivy: scan failed to produce valid output")
+        lines.append("Trivy: FAILED TO RUN — scan did not produce valid output")
+        scan_errors.append("trivy")
 
     gitleaks_report = "/tmp/gitleaks_report.json"
     run(
@@ -81,6 +84,10 @@ def run_static_analysis(repo_dir: str) -> dict:
         capture_output=True, text=True,
     )
     try:
+        # Gitleaks writes the report file even at zero findings (as an
+        # empty JSON array) — a missing file means the scanner itself
+        # never ran, not that the repo is clean. Only a successfully
+        # parsed file counts as a real result, either way.
         with open(gitleaks_report) as f:
             gitleaks_data = json.load(f)
         counts["gitleaks_count"] = len(gitleaks_data)
@@ -88,9 +95,10 @@ def run_static_analysis(repo_dir: str) -> dict:
         for g in gitleaks_data[:5]:
             lines.append(f"  - {g['RuleID']} in {g['File']}:{g['StartLine']}")
     except (FileNotFoundError, json.JSONDecodeError):
-        lines.append("Gitleaks: 0 potential secret(s) found")
+        lines.append("Gitleaks: FAILED TO RUN — report file missing or invalid")
+        scan_errors.append("gitleaks")
 
-    return {"text": "\n".join(lines), **counts}
+    return {"text": "\n".join(lines), "scan_errors": scan_errors, **counts}
 
 
 def run_node_project(repo_dir: str, package_json_path: str) -> int:
@@ -130,13 +138,32 @@ def run_python_project(repo_dir: str) -> int:
     # main install, using one of two incompatible mechanisms:
     #   - [project.optional-dependencies] (older, PEP 621): pip install .[name]
     #   - [dependency-groups] (newer, PEP 735): pip install --group name .
-    # Best-effort: try common names under both, ignoring failures since
-    # not every project uses either pattern.
+    # Best-effort: try common names under both. Note: pip's exit code
+    # for a nonexistent *extra* is always 0 (it silently ignores unknown
+    # extras) — the only reliable success signal is the absence of its
+    # own "does not provide the extra" warning in the output. The
+    # --group mechanism, by contrast, correctly fails (exit code 1) for
+    # an unknown group name, so its exit code can be trusted directly.
+    found_extra = False
     for name in ("test", "tests", "testing", "dev"):
-        run(["pip", "install", "--break-system-packages", f".[{name}]"],
-            cwd=repo_dir, capture_output=True)
-        run(["pip", "install", "--break-system-packages", "--group", name, "."],
-            cwd=repo_dir, capture_output=True)
+        extras_result = run(
+            ["pip", "install", "--break-system-packages", f".[{name}]"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+        if "does not provide the extra" not in (extras_result.stdout + extras_result.stderr):
+            print(f"Installed optional dependencies: .[{name}]")
+            found_extra = True
+
+        group_result = run(
+            ["pip", "install", "--break-system-packages", "--group", name, "."],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+        if group_result.returncode == 0:
+            print(f"Installed dependency group: {name}")
+            found_extra = True
+
+    if not found_extra:
+        print("No matching test/dev dependency extras or groups found (tried: test, tests, testing, dev).")
 
     has_tests = os.path.isdir(os.path.join(repo_dir, "tests")) or any(
         f.startswith("test_") and f.endswith(".py") for f in os.listdir(repo_dir)

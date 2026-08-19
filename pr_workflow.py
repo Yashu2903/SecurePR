@@ -19,14 +19,10 @@ from kubernetes_asyncio import client, config
 from temporalio import activity, workflow
 
 from github_client import get_installation_client
-
-GCP_PROJECT_ID = "securepr-505401"
-GCP_LOCATION = "us-central1"
-PLANNER_MODEL = "gemini-2.5-pro"
-SANDBOX_IMAGE = "us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo/pr-sandbox:v9"
-K8S_NAMESPACE = "default"
-CHECK_RUN_NAME = "SecurePRBox Sandbox Execution"
-TASK_QUEUE = "securepr-task-queue"
+from config import (
+    GCP_PROJECT_ID, GCP_LOCATION, PLANNER_MODEL, SANDBOX_IMAGE,
+    K8S_NAMESPACE, CHECK_RUN_NAME, TASK_QUEUE,
+)
 
 DETERMINISTIC_MARKERS = {"securepr.sh", "package.json", "requirements.txt", "pyproject.toml"}
 
@@ -245,7 +241,8 @@ async def assess_risk_activity(logs: str, build_succeeded: bool) -> dict:
     only writes the plain-English explanation of a verdict that's
     already decided by the rules below."""
     findings = {"semgrep_count": 0, "trivy_total_count": 0,
-                "trivy_critical_count": 0, "trivy_high_count": 0, "gitleaks_count": 0}
+                "trivy_critical_count": 0, "trivy_high_count": 0, "gitleaks_count": 0,
+                "scan_errors": []}
     marker = "FINDINGS_JSON:"
     for line in logs.splitlines():
         if line.startswith(marker):
@@ -259,7 +256,7 @@ async def assess_risk_activity(logs: str, build_succeeded: bool) -> dict:
         conclusion = "failure"
     elif findings["gitleaks_count"] > 0 or findings["trivy_critical_count"] > 0:
         conclusion = "failure"
-    elif findings["trivy_high_count"] > 0:
+    elif findings["trivy_high_count"] > 0 or findings.get("scan_errors"):
         conclusion = "neutral"
     else:
         conclusion = "success"
@@ -273,6 +270,7 @@ async def assess_risk_activity(logs: str, build_succeeded: bool) -> dict:
 - Semgrep findings: {findings['semgrep_count']}
 - Trivy vulnerabilities: {findings['trivy_total_count']} total ({findings['trivy_critical_count']} critical, {findings['trivy_high_count']} high)
 - Gitleaks (potential secrets): {findings['gitleaks_count']}
+- Scanners that failed to run: {', '.join(findings.get('scan_errors', [])) or 'none'}
 - Overall verdict already decided: {conclusion}
 
 The tail of the actual execution log:
@@ -280,8 +278,9 @@ The tail of the actual execution log:
 
 Write a 2-3 sentence plain-English summary of these results for a
 developer reviewing this PR. If the build/test failed, explain the
-actual reason based on the log above, not just that it failed. Be
-direct about anything serious. Do not propose a different verdict
+actual reason based on the log above, not just that it failed. If any
+scanner failed to run, say so explicitly — don't imply a clean scan.
+Be direct about anything serious. Do not propose a different verdict
 than the one given."""
 
     gemini_client = genai.Client(vertexai=True, project=GCP_PROJECT_ID, location=GCP_LOCATION)

@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY webhook_receiver.py pr_workflow.py github_client.py .
+COPY webhook_receiver.py pr_workflow.py github_client.py config.py .
 
 RUN pip install --no-cache-dir \
     fastapi \

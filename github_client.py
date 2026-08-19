@@ -6,8 +6,7 @@ instead of a local private key file.
 from github import Auth, GithubIntegration
 from google.cloud import secretmanager
 
-GCP_PROJECT_ID = "securepr-505401"
-APP_ID = "4562657"
+from config import GCP_PROJECT_ID, GITHUB_APP_ID
 
 
 def get_secret(secret_id: str) -> str:
@@ -19,7 +18,7 @@ def get_secret(secret_id: str) -> str:
 
 def get_installation_client(installation_id: int):
     private_key = get_secret("github-app-private-key")
-    auth = Auth.AppAuth(APP_ID, private_key)
+    auth = Auth.AppAuth(GITHUB_APP_ID, private_key)
     integration = GithubIntegration(auth=auth)
     return integration.get_github_for_installation(installation_id)
 

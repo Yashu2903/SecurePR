@@ -4,7 +4,7 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
 
-COPY pr_workflow.py github_client.py temporal_worker.py .
+COPY pr_workflow.py github_client.py temporal_worker.py config.py .
 
 RUN pip install --no-cache-dir \
     temporalio \

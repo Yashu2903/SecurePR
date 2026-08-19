@@ -9,16 +9,15 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 
 from fastapi import FastAPI, HTTPException, Request
 from temporalio.client import Client
 
+from config import TEMPORAL_ADDRESS
 from github_client import get_secret
 from pr_workflow import PRTarget, PRVerificationWorkflow, TASK_QUEUE
 
 WEBHOOK_SECRET = get_secret("webhook-secret")
-TEMPORAL_ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("webhook")
