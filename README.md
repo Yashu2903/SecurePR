@@ -87,9 +87,10 @@ Gemini does not choose whether a pull request passes. `assess_risk_activity` app
 | Gitleaks finds one or more potential secrets | `failure` |
 | Trivy finds one or more critical vulnerabilities | `failure` |
 | Trivy finds one or more high vulnerabilities, with no failure condition above | `neutral` |
+| One or more scanners fail to produce valid results, with no failure condition above | `neutral` |
 | None of the above | `success` |
 
-Semgrep findings and lower-severity Trivy findings are reported, but they do not currently change the conclusion.
+Semgrep findings and lower-severity Trivy findings are reported, but they do not currently change the conclusion. Scanner execution or parsing failures are tracked separately in `scan_errors`, explicitly included in the developer summary, and prevent a clean `success` result.
 
 ## Supported projects and execution priority
 
@@ -101,7 +102,7 @@ The sandbox chooses the first matching strategy:
 4. **AI-proposed plan** — when no deterministic marker exists, the worker may ask Gemini for one install command and one test command restricted to `npm` or `pip` projects.
 5. **Clone-only fallback** — if no strategy is found, SecurePR lists the repository contents and reports that nothing was run.
 
-For Python projects, the runner also makes best-effort attempts to install optional/dependency groups named `test`, `tests`, `testing`, and `dev`. Failures from those optional attempts are ignored; failure of the main dependency installation is not.
+For Python projects, the runner also probes optional dependencies and dependency groups named `test`, `tests`, `testing`, and `dev`. It distinguishes an unavailable extra from an installed one, reports successful matches, and prints a message when none of the standard names exists. Failure of the main dependency installation still fails the run.
 
 ### Custom execution with `securepr.sh`
 
@@ -148,6 +149,7 @@ The Semgrep rules, Trivy binary/database, and Gitleaks binary are baked into the
 
 | Path | Purpose |
 | --- | --- |
+| `config.py` | Environment-overridable application configuration and deployment defaults |
 | `webhook_receiver.py` | FastAPI webhook endpoint, signature validation, and Temporal workflow startup |
 | `github_client.py` | Google Secret Manager access and GitHub App installation authentication |
 | `pr_workflow.py` | Temporal workflow, Kubernetes Job construction, log collection, verdict calculation, and Check Run updates |
@@ -164,25 +166,27 @@ The Semgrep rules, Trivy binary/database, and Gitleaks binary are baked into the
 | `k8s/worker-rbac.yaml` | Minimal namespace-scoped permissions for the worker |
 | `k8s/network-policy.yaml` | Default deny plus GKE NodeLocal DNS access for sandbox pods |
 | `k8s/sandbox-fqdn-policy.yaml` | GKE FQDN egress allowlist |
-| `k8s/kyverno-*.yaml` | Admission policies and negative test manifests |
+| `k8s/kyverno-*.yaml` | Production admission policies for runtime class and image provenance |
+| `k8s/dev/` | Development sandbox and negative policy-test manifests |
 | `trigger_pr_workflow.py` | Manually starts a workflow for a hard-coded test pull request |
 
 ## Configuration
 
-Several deployment identifiers are currently constants in the source. Update them before deploying into a different environment.
+Application identifiers are centralized in `config.py`. Every setting below can be overridden with an environment variable, while its default matches the current deployment.
 
-| Setting | Current location | Default/current value |
+| Setting | Environment variable | Default |
 | --- | --- | --- |
-| Google Cloud project | `github_client.py`, `pr_workflow.py` | `securepr-505401` |
-| Google Cloud region | `pr_workflow.py` | `us-central1` |
-| Gemini model | `pr_workflow.py` | `gemini-2.5-pro` |
-| GitHub App ID | `github_client.py` | `4562657` |
-| Sandbox image | `pr_workflow.py` | Artifact Registry `pr-sandbox:v9` |
-| Kubernetes namespace | `pr_workflow.py` | `default` |
-| Temporal task queue | `pr_workflow.py` | `securepr-task-queue` |
-| Temporal address | `temporal_worker.py`, `webhook_receiver.py` | `localhost:7233` or `TEMPORAL_ADDRESS` |
-| GitHub private-key secret | `github_client.py` | `github-app-private-key` |
-| Webhook secret | `webhook_receiver.py` | `webhook-secret` |
+| Google Cloud project | `GCP_PROJECT_ID` | `securepr-505401` |
+| Google Cloud region | `GCP_LOCATION` | `us-central1` |
+| Gemini model | `PLANNER_MODEL` | `gemini-2.5-pro` |
+| GitHub App ID | `GITHUB_APP_ID` | `4562657` |
+| Sandbox image | `SANDBOX_IMAGE` | Artifact Registry `pr-sandbox:v11` |
+| Kubernetes namespace | `K8S_NAMESPACE` | `default` |
+| GitHub Check Run name | `CHECK_RUN_NAME` | `SecurePRBox Sandbox Execution` |
+| Temporal task queue | `TASK_QUEUE` | `securepr-task-queue` |
+| Temporal address | `TEMPORAL_ADDRESS` | `localhost:7233` |
+
+Set the relevant variables on the worker and webhook deployments when overriding defaults. The Secret Manager resource names remain fixed in their consumers: `github-app-private-key` in `github_client.py` and `webhook-secret` in `webhook_receiver.py`.
 
 The Kubernetes manifests additionally assume:
 
@@ -275,16 +279,16 @@ Bind these Kubernetes service accounts to appropriately scoped Google service ac
 ```bash
 REGISTRY=us-central1-docker.pkg.dev/securepr-505401/pr-sandbox-repo
 
-docker build -t "$REGISTRY/pr-sandbox:v9" .
+docker build -t "$REGISTRY/pr-sandbox:v11" .
 docker build -f Dockerfile.worker -t "$REGISTRY/temporal-worker:v1" .
 docker build -f Dockerfile.webhook -t "$REGISTRY/webhook-receiver:v1" .
 
-docker push "$REGISTRY/pr-sandbox:v9"
+docker push "$REGISTRY/pr-sandbox:v11"
 docker push "$REGISTRY/temporal-worker:v1"
 docker push "$REGISTRY/webhook-receiver:v1"
 ```
 
-Keep the image tags in `pr_workflow.py`, the deployments, and the Kyverno image policy consistent. Prefer immutable version tags or digests for production releases.
+Keep the image tags in `config.py`, the deployments, and the Kyverno image policy consistent. Prefer immutable version tags or digests for production releases.
 
 ### 5. Apply access and security policies
 
@@ -403,8 +407,8 @@ The workflow itself reads sandbox output from Cloud Logging. If a Job completes 
 The two Kyverno test manifests are intentionally invalid and should be rejected by the admission controller:
 
 ```bash
-kubectl apply -f k8s/kyverno-test-bad-runtimeclass.yaml
-kubectl apply -f k8s/kyverno-test-bad-image.yaml
+kubectl apply -f k8s/dev/kyverno-test-bad-runtimeclass.yaml
+kubectl apply -f k8s/dev/kyverno-test-bad-image.yaml
 ```
 
 The first omits gVisor; the second uses an image outside the approved Artifact Registry path. Admission is expected to fail.
@@ -415,7 +419,7 @@ There is not yet a complete automated test suite for this repository. At minimum
 
 ```bash
 python -m py_compile \
-  github_client.py webhook_receiver.py pr_workflow.py temporal_worker.py \
+  config.py github_client.py webhook_receiver.py pr_workflow.py temporal_worker.py \
   run_pr.py ns_sandbox_v4.py build_semgrep_rules.py
 
 kubectl apply --dry-run=server -f k8s/
@@ -463,17 +467,15 @@ kubectl apply --dry-run=server -f k8s/
 ## Known limitations
 
 - Python and Node.js are the only intentionally supported project ecosystems.
-- The project currently hard-codes GCP, GitHub App, namespace, model, and image identifiers instead of using a centralized configuration layer.
 - The Trivy vulnerability database is captured when the sandbox image is built and becomes stale until the image is rebuilt.
 - Semgrep findings are informational for verdict purposes; any count can still produce `success` if no higher-priority rule triggers.
-- A scanner execution or JSON-parsing failure is currently reported in the logs but does not automatically fail the Check Run.
-- Optional Python dependency-group installation is best-effort and silently ignores unavailable group names.
+- A scanner execution or JSON-parsing failure now produces `neutral`, not `failure`. Repositories that require fail-closed scanning should account for that in branch-protection policy.
+- Python test dependency discovery probes only the conventional names `test`, `tests`, `testing`, and `dev`; custom group names are not discovered automatically.
 - The AI fallback executes generated shell commands. The commands are constrained by the prompt and sandbox boundaries, but they are not parsed against a command allowlist.
 - `trigger_pr_workflow.py` contains environment-specific sample values and must be edited before use.
-- `trigger_test_workflow.py` is a legacy smoke script that references a removed `GreetingWorkflow` and is not part of the current PR-verification path.
-- `k8s/sandbox-job.yaml` and the `*-test-*.yaml` files are development/test manifests, not the production Job created by `pr_workflow.py`.
+- Files under `k8s/dev/` are development/test manifests, not the production Job created by `pr_workflow.py`.
+- Application configuration is centralized and environment-overridable, but the Kubernetes manifests still contain deployment-specific resource names and image references.
 - The repository does not yet include infrastructure-as-code, dependency lock files, CI configuration, database provisioning, or a comprehensive automated test suite.
-- `Dockerfile.webhook` imports `pr_workflow.py`, which depends on `google-genai`, but the image currently does not install that package. Add `google-genai` to the webhook image dependencies before deploying it.
 
 ## Contributing
 
